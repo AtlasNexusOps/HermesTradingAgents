@@ -2,20 +2,12 @@
 """
 Hermes MCP Trading Tool — Analyse financière multi-agent via LangGraph.
 
-Usage en mode MCP (JSON-RPC sur stdin/stdout) :
-  python hermes_trading_tool.py
-
-Endpoint appelable par Hermes :
-  tool: trading_analyze
-  params: { ticker: str, date?: str, deep_think_llm?: str, quick_think_llm?: str }
+Tools: trading_analyze (deep single ticker), market_scan (batch multi-tickers)
 """
 
-import sys
-import json
-import os
+import sys, json, os
 from datetime import date
 
-# Charger .env si présent
 def _load_dotenv():
     for p in (".env", ".env.hermes"):
         if os.path.exists(p):
@@ -29,125 +21,157 @@ def _load_dotenv():
 
 _load_dotenv()
 
-# ── MCP JSON-RPC dispatcher ──────────────────────────────────────
+TOOLS = [
+    {
+        "name": "trading_analyze",
+        "description": "Deep multi-agent analysis of a single stock ticker. 4 analysts + debate + risk review.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker (AAPL, NVDA…)"},
+                "date": {"type": "string", "description": "Date YYYY-MM-DD (default: today)"},
+            },
+            "required": ["ticker"]
+        }
+    },
+    {
+        "name": "market_scan",
+        "description": "Quick batch scan of multiple tickers. Price, daily change %, volume, and an LLM-generated one-line signal per ticker. Returns ranked overview. Use for 'analyse le marché' or sector overview.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tickers": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Ticker list (e.g., ['AAPL','NVDA','MSFT','TSLA','META','GOOGL'])"
+                },
+                "date": {"type": "string", "description": "Date YYYY-MM-DD (default: today)"},
+            },
+            "required": ["tickers"]
+        }
+    },
+]
+
 
 def handle_request(req: dict) -> dict:
     method = req.get("method", "")
     req_id = req.get("id")
 
     if method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "trading_analyze",
-                        "description": "Run multi-agent LLM trading analysis on a stock ticker. Returns buy/sell/hold recommendation with analyst reports and debate summary.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "ticker": {
-                                    "type": "string",
-                                    "description": "Stock ticker symbol (e.g., AAPL, NVDA, TSLA)"
-                                },
-                                "date": {
-                                    "type": "string",
-                                    "description": "Analysis date in YYYY-MM-DD format (default: today)"
-                                },
-                                "deep_think_llm": {
-                                    "type": "string",
-                                    "description": "Deep-thinking LLM model (default: deepseek-chat)"
-                                },
-                                "quick_think_llm": {
-                                    "type": "string",
-                                    "description": "Quick-thinking LLM model (default: deepseek-chat)"
-                                }
-                            },
-                            "required": ["ticker"]
-                        }
-                    }
-                ]
-            }
-        }
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
 
     if method == "tools/call":
-        params = req.get("params", {})
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        p = req.get("params", {})
+        name = p.get("name", "")
+        args = p.get("arguments", {})
 
-        if tool_name == "trading_analyze":
-            try:
-                result = run_analysis(
-                    ticker=arguments["ticker"],
-                    analysis_date=arguments.get("date"),
-                    deep_think_llm=arguments.get("deep_think_llm"),
-                    quick_think_llm=arguments.get("quick_think_llm"),
-                )
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": [{"type": "text", "text": result}]
-                    }
-                }
-            except Exception as e:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32000, "message": str(e)}
-                }
+        try:
+            if name == "trading_analyze":
+                r = run_analysis(args["ticker"], args.get("date"))
+                return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": r}]}}
+            if name == "market_scan":
+                r = run_market_scan(args["tickers"], args.get("date"))
+                return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": r}]}}
+        except Exception as e:
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}}
 
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}
-        }
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown tool: {name}"}}
 
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {"code": -32601, "message": f"Unknown method: {method}"}
-    }
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown method: {method}"}}
 
 
-def run_analysis(
-    ticker: str,
-    analysis_date: str | None = None,
-    deep_think_llm: str | None = None,
-    quick_think_llm: str | None = None,
-) -> str:
-    """Execute a trading analysis and return formatted result."""
+# ── Deep single-ticker ────────────────────────────────────────────
 
+def run_analysis(ticker: str, analysis_date: str | None = None) -> str:
     if analysis_date is None:
         analysis_date = date.today().strftime("%Y-%m-%d")
 
-    # Override config via env vars
     os.environ["TRADINGAGENTS_LLM_PROVIDER"] = os.environ.get("TRADINGAGENTS_LLM_PROVIDER", "deepseek")
-    if deep_think_llm:
-        os.environ["TRADINGAGENTS_DEEP_THINK_LLM"] = deep_think_llm
-    if quick_think_llm:
-        os.environ["TRADINGAGENTS_QUICK_THINK_LLM"] = quick_think_llm
 
     from tradingagents.graph.trading_graph import TradingAgentsGraph
     from tradingagents.default_config import DEFAULT_CONFIG
 
     config = DEFAULT_CONFIG.copy()
-    config["output_language"] = os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE", "English")
+    config["output_language"] = "English"
+    config["max_debate_rounds"] = 1
+    config["max_risk_discuss_rounds"] = 1
 
     graph = TradingAgentsGraph(debug=False, config=config)
     _, decision = graph.propagate(ticker, analysis_date)
 
-    # Format output
-    lines = [
-        f"## 📊 Trading Analysis: {ticker} ({analysis_date})",
-        "",
-        str(decision),
-    ]
+    return f"## 📊 Trading Analysis: {ticker} ({analysis_date})\n\n{decision}"
+
+
+# ── Market scan (batch) ───────────────────────────────────────────
+
+def run_market_scan(tickers: list[str], analysis_date: str | None = None) -> str:
+    if analysis_date is None:
+        analysis_date = date.today().strftime("%Y-%m-%d")
+
+    import yfinance as yf
+    from openai import OpenAI
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        return "❌ DEEPSEEK_API_KEY not set in environment"
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+
+    lines = [f"## 🌐 Market Scan — {analysis_date}\n"]
+    green, red = 0, 0
+
+    for t in tickers:
+        try:
+            stock = yf.Ticker(t)
+            hist = stock.history(period="5d")
+            if hist.empty:
+                lines.append(f"### ❌ {t} — no data\n")
+                continue
+
+            current = hist["Close"].iloc[-1]
+            prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
+            change_pct = ((current - prev) / prev) * 100 if prev else 0
+            vol = int(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else 0
+
+            if change_pct >= 0:
+                green += 1
+                arrow = "🟢"
+            else:
+                red += 1
+                arrow = "🔴"
+
+            # Quick LLM signal
+            try:
+                resp = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            f"Stock: {t} — Price: ${current:.2f} — "
+                            f"Daily change: {change_pct:+.2f}% — Volume: {vol:,}\n"
+                            f"Date: {analysis_date}\n\n"
+                            f"Based on the price action and volume, give a ONE-LINE trading signal:\n"
+                            f"Format exactly: SIGNAL: BUY|SELL|HOLD | REASON: <one short reason>"
+                        )
+                    }],
+                    max_tokens=80,
+                    temperature=0.3,
+                )
+                signal = (resp.choices[0].message.content or "").strip()
+            except Exception:
+                signal = "SIGNAL: HOLD | REASON: analysis unavailable"
+
+            lines.append(f"### {arrow} {t} — ${current:.2f} ({change_pct:+.2f}%) | Vol: {vol:,}")
+            lines.append(f"> {signal}\n")
+
+        except Exception as e:
+            lines.append(f"### ❌ {t} — error: {e}\n")
+
+    lines.append("---")
+    lines.append(f"**{len(tickers)} tickers** | 🟢 {green} up | 🔴 {red} down")
+
     return "\n".join(lines)
 
 
-# ── Main: JSON-RPC loop ──────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────
 
 def main():
     for line in sys.stdin:
@@ -161,7 +185,6 @@ def main():
             sys.stdout.flush()
         except json.JSONDecodeError:
             continue
-
 
 if __name__ == "__main__":
     main()
