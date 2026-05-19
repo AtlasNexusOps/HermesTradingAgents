@@ -1,0 +1,60 @@
+# ── HermesTradingAgents — Docker Compose (Ubuntu 24.04) ────────────
+# Usage: docker compose -f docker-compose.hermes.yml up -d
+#
+# Deux profils disponibles :
+#   default    → DeepSeek API (cloud)
+#   ollama     → Ollama local (qwen3, llama3, etc.)
+
+services:
+  # ── Mode Cloud (DeepSeek) ──────────────────────────────────────
+  hermes-trading:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes
+    container_name: hermes-trading-agents
+    env_file:
+      - .env
+    environment:
+      - TRADINGAGENTS_LLM_PROVIDER=${TRADINGAGENTS_LLM_PROVIDER:-deepseek}
+      - TRADINGAGENTS_DEEP_THINK_LLM=${TRADINGAGENTS_DEEP_THINK_LLM:-deepseek-chat}
+      - TRADINGAGENTS_QUICK_THINK_LLM=${TRADINGAGENTS_QUICK_THINK_LLM:-deepseek-chat}
+    volumes:
+      - hermes_trading_data:/home/appuser/.tradingagents
+      - ./mcp:/home/appuser/app/mcp:ro
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+
+  # ── Ollama (optionnel, pour mode local) ────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hermes-trading-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - ollama
+    restart: unless-stopped
+
+  hermes-trading-ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes
+    container_name: hermes-trading-agents-ollama
+    env_file:
+      - .env
+    environment:
+      - TRADINGAGENTS_LLM_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+    volumes:
+      - hermes_trading_data:/home/appuser/.tradingagents
+    depends_on:
+      - ollama
+    tty: true
+    stdin_open: true
+    profiles:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  hermes_trading_data:
+  ollama_data:

@@ -1,0 +1,64 @@
+# ── HermesTradingAgents — Dockerfile (Ubuntu 24.04 LTS target) ────
+# Multi-stage build optimisé pour Ubuntu 24.04
+#
+# Build:
+#   docker build -f Dockerfile.hermes -t hermes-trading-agents .
+#
+# Run interactif:
+#   docker run -it --env-file .env hermes-trading-agents
+#
+# Run MCP (mode Hermes):
+#   docker run -i --env-file .env hermes-trading-agents python mcp/hermes_trading_tool.py
+
+FROM python:3.12-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /build
+COPY pyproject.toml requirements.txt ./
+COPY tradingagents/ ./tradingagents/
+COPY cli/ ./cli/
+
+RUN pip install --no-cache-dir .
+
+# ── Runtime stage ─────────────────────────────────────────────────
+
+FROM python:3.12-slim-bookworm
+
+LABEL org.opencontainers.image.title="HermesTradingAgents"
+LABEL org.opencontainers.image.description="Multi-agent LLM trading framework — Hermes-compatible"
+LABEL org.opencontainers.image.source="https://github.com/AtlasNexusOps/HermesTradingAgents"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Runtime deps for yfinance, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN useradd --create-home --shell /bin/bash appuser \
+ && install -d -m 0755 -o appuser -g appuser /home/appuser/.tradingagents \
+ && install -d -m 0755 -o appuser -g appuser /home/appuser/app/mcp
+
+USER appuser
+WORKDIR /home/appuser/app
+
+COPY --from=builder --chown=appuser:appuser /build .
+
+# MCP tool
+COPY --chown=appuser:appuser mcp/ ./mcp/
+
+# Point d'entrée par défaut : shell interactif pour debug
+# Pour le mode MCP avec Hermes, utilisez :
+#   docker run -i --env-file .env hermes-trading-agents python mcp/hermes_trading_tool.py
+CMD ["/bin/bash"]
